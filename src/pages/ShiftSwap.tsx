@@ -30,13 +30,18 @@ const IS_MANAGER = true
 type TabType = 'shift_swap' | 'shift_exchange' | 'approval'
 
 const STATUS_MAP: Record<string, { label: string; className: string }> = {
-  pending: { label: '待确认', className: 'bg-gray-100 text-gray-600 border-gray-300' },
   confirmed: { label: '已确认待审批', className: 'bg-blue-100 text-blue-700 border-blue-200' },
   approved: { label: '已通过', className: 'bg-green-100 text-green-700 border-green-200' },
   rejected: { label: '已驳回', className: 'bg-red-100 text-red-700 border-red-200' },
 }
 
-function getStatusStyle(status: string) {
+function getStatusStyle(status: string, swapType?: string) {
+  if (status === 'pending') {
+    if (swapType === 'shift_exchange') {
+      return { label: '待对方确认', className: 'bg-orange-100 text-orange-700 border-orange-200' }
+    }
+    return { label: '待审批', className: 'bg-gray-100 text-gray-600 border-gray-300' }
+  }
   return (
     STATUS_MAP[status] || {
       label: status,
@@ -678,13 +683,19 @@ function ApprovalTab() {
                       <span
                         className={cn(
                           'inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium',
-                          getStatusStyle(r.status).className
+                          getStatusStyle(r.status, r.swapType).className
                         )}
                       >
-                        {getStatusStyle(r.status).label}
+                        {getStatusStyle(r.status, r.swapType).label}
                       </span>
                     </div>
                     <div className="text-sm text-gray-600">原因：{r.reason}</div>
+                    {r.approverName && (
+                      <div className="text-xs text-gray-500">
+                        审批人：{r.approverName}
+                        {r.approvedAt && ` · ${r.approvedAt.slice(0, 16)}`}
+                      </div>
+                    )}
                     <div className="text-xs text-gray-400">申请时间：{r.createdAt?.slice(0, 16)}</div>
                   </div>
                   {(r.status === 'pending' || r.status === 'confirmed') && (
@@ -774,11 +785,16 @@ function SwapRequestList({
                 <span
                   className={cn(
                     'inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium',
-                    getStatusStyle(r.status).className
+                    getStatusStyle(r.status, r.swapType).className
                   )}
                 >
-                  {getStatusStyle(r.status).label}
+                  {getStatusStyle(r.status, r.swapType).label}
                 </span>
+                {r.swapType === 'shift_exchange' && r.targetEmployeeId !== r.requesterId && (
+                  <span className="text-xs text-gray-400">
+                    {r.targetConfirmed ? '对方已确认' : '待对方确认'}
+                  </span>
+                )}
               </div>
               <div className="text-sm text-gray-600">原因：{r.reason}</div>
               {r.approverName && (
