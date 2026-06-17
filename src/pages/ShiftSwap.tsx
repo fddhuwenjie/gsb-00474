@@ -13,6 +13,7 @@ import {
   FileText,
   User,
   Check,
+  Clock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
@@ -29,20 +30,34 @@ const IS_MANAGER = true
 
 type TabType = 'shift_swap' | 'shift_exchange' | 'approval'
 
-const STATUS_MAP: Record<string, { label: string; className: string }> = {
-  pending: { label: '待确认', className: 'bg-gray-100 text-gray-600 border-gray-300' },
-  confirmed: { label: '已确认待审批', className: 'bg-blue-100 text-blue-700 border-blue-200' },
-  approved: { label: '已通过', className: 'bg-green-100 text-green-700 border-green-200' },
-  rejected: { label: '已驳回', className: 'bg-red-100 text-red-700 border-red-200' },
-}
-
-function getStatusStyle(status: string) {
-  return (
-    STATUS_MAP[status] || {
-      label: status,
-      className: 'bg-gray-100 text-gray-600 border-gray-200',
+function getStatusInfo(status: string, swapType: string, targetConfirmed: boolean) {
+  if (swapType === 'shift_swap') {
+    switch (status) {
+      case 'pending':
+        return { label: '待审批', className: 'bg-orange-100 text-orange-700 border-orange-200' }
+      case 'approved':
+        return { label: '已通过', className: 'bg-green-100 text-green-700 border-green-200' }
+      case 'rejected':
+        return { label: '已驳回', className: 'bg-red-100 text-red-700 border-red-200' }
+      default:
+        return { label: status, className: 'bg-gray-100 text-gray-600 border-gray-200' }
     }
-  )
+  } else {
+    switch (status) {
+      case 'pending':
+        return targetConfirmed
+          ? { label: '待审批', className: 'bg-orange-100 text-orange-700 border-orange-200' }
+          : { label: '待对方确认', className: 'bg-yellow-100 text-yellow-700 border-yellow-200' }
+      case 'confirmed':
+        return { label: '待审批', className: 'bg-blue-100 text-blue-700 border-blue-200' }
+      case 'approved':
+        return { label: '已通过', className: 'bg-green-100 text-green-700 border-green-200' }
+      case 'rejected':
+        return { label: '已驳回', className: 'bg-red-100 text-red-700 border-red-200' }
+      default:
+        return { label: status, className: 'bg-gray-100 text-gray-600 border-gray-200' }
+    }
+  }
 }
 
 function getSwapTypeLabel(type: string) {
@@ -162,6 +177,10 @@ function ShiftSwapTab() {
       setError('请选择原日期和目标日期')
       return
     }
+    if (form.originalDate === form.targetDate) {
+      setError('原日期与目标日期不能相同')
+      return
+    }
     if (!originalSchedule) {
       setError('原日期无排班信息')
       return
@@ -188,7 +207,7 @@ function ShiftSwapTab() {
         reason: form.reason.trim(),
       })
       if (res.success) {
-        setMessage('调班申请已提交')
+        setMessage('调班申请已提交，等待审批')
         setForm({ originalDate: '', targetDate: '', reason: '' })
         setOriginalSchedule(null)
         setTargetSchedule(null)
@@ -210,6 +229,9 @@ function ShiftSwapTab() {
           <ArrowLeftRight className="h-5 w-5 text-indigo-600" />
           调班申请
         </h3>
+        <p className="mb-4 text-sm text-gray-500">
+          调班是指将您两个日期的班次进行互换，两个日期都需要已有排班。
+        </p>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
             <label className="mb-1.5 block text-sm font-medium text-gray-700">原日期</label>
@@ -354,7 +376,11 @@ function ShiftExchangeTab() {
       if (allRes.success) {
         setIncomingRequests(
           (allRes.data || []).filter(
-            (r: ShiftSwapRequest) => r.swapType === 'shift_exchange' && r.targetEmployeeId === CURRENT_EMPLOYEE_ID && !r.targetConfirmed
+            (r: ShiftSwapRequest) =>
+              r.swapType === 'shift_exchange' &&
+              r.targetEmployeeId === CURRENT_EMPLOYEE_ID &&
+              !r.targetConfirmed &&
+              r.status === 'pending'
           )
         )
       }
@@ -399,7 +425,7 @@ function ShiftExchangeTab() {
         reason: form.reason.trim(),
       })
       if (res.success) {
-        setMessage('换班申请已提交')
+        setMessage('换班申请已提交，等待对方确认')
         setForm({ originalDate: '', targetEmployeeId: '', reason: '' })
         setOriginalSchedule(null)
         await loadData()
@@ -420,7 +446,7 @@ function ShiftExchangeTab() {
     try {
       const res = await swapApi.confirm(id, CURRENT_EMPLOYEE_ID)
       if (res.success) {
-        setMessage('已确认换班申请')
+        setMessage('已确认换班申请，等待审批')
         await loadData()
       } else {
         setError(res.error || '确认失败')
@@ -439,9 +465,12 @@ function ShiftExchangeTab() {
           <ArrowRightLeft className="h-5 w-5 text-indigo-600" />
           换班申请
         </h3>
+        <p className="mb-4 text-sm text-gray-500">
+          换班是指与同事在同一天互换班次，需要对方确认后才能进入审批流程。
+        </p>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-gray-700">原日期</label>
+            <label className="mb-1.5 block text-sm font-medium text-gray-700">换班日期</label>
             <input
               type="date"
               value={form.originalDate}
@@ -450,7 +479,7 @@ function ShiftExchangeTab() {
             />
             {originalSchedule && (
               <div className="mt-1.5 text-xs text-gray-500">
-                班次：{originalSchedule.shift_name}（{originalSchedule.start_time?.slice(0, 5)} - {originalSchedule.end_time?.slice(0, 5)}）
+                我的班次：{originalSchedule.shift_name}（{originalSchedule.start_time?.slice(0, 5)} - {originalSchedule.end_time?.slice(0, 5)}）
               </div>
             )}
             {form.originalDate && !originalSchedule && (
@@ -514,6 +543,9 @@ function ShiftExchangeTab() {
             <h3 className="flex items-center gap-2 text-lg font-semibold text-gray-900">
               <AlertCircle className="h-5 w-5 text-orange-500" />
               待我确认的换班请求
+              <span className="ml-2 rounded-full bg-orange-500 px-2 py-0.5 text-xs font-medium text-white">
+                {incomingRequests.length}
+              </span>
             </h3>
           </div>
           <div className="divide-y divide-orange-100">
@@ -526,12 +558,18 @@ function ShiftExchangeTab() {
                         <User className="h-3.5 w-3.5" />
                         {r.requesterName}
                       </span>
-                      <span className="inline-flex items-center rounded-md bg-indigo-50 px-2.5 py-0.5 text-sm font-medium text-indigo-700">
+                      <span className="inline-flex items-center rounded-md bg-purple-50 px-2.5 py-0.5 text-sm font-medium text-purple-700">
                         换班
                       </span>
-                      <span className="text-sm text-gray-600">原日期：{r.originalDate}</span>
+                      <span className="text-sm text-gray-600">日期：{r.originalDate}</span>
+                      {r.originalShiftName && (
+                        <span className="text-sm text-gray-500">
+                          对方班次：{r.originalShiftName}
+                        </span>
+                      )}
                     </div>
                     <div className="text-sm text-gray-600">原因：{r.reason}</div>
+                    <div className="text-xs text-gray-400">申请时间：{r.createdAt?.slice(0, 16)}</div>
                   </div>
                   <button
                     onClick={() => handleConfirm(r.id)}
@@ -543,7 +581,7 @@ function ShiftExchangeTab() {
                     ) : (
                       <Check className="h-4 w-4" />
                     )}
-                    确认
+                    确认换班
                   </button>
                 </div>
               </div>
@@ -606,7 +644,7 @@ function ApprovalTab() {
     try {
       const res = await swapApi.approve(id, CURRENT_EMPLOYEE_ID, status)
       if (res.success) {
-        setMessage(status === 'approved' ? '已通过' : '已驳回')
+        setMessage(status === 'approved' ? '审批已通过' : '申请已驳回')
         await loadData()
       } else {
         setError(res.error || '操作失败')
@@ -616,6 +654,12 @@ function ApprovalTab() {
     } finally {
       setApprovingId(null)
     }
+  }
+
+  const canApprove = (r: ShiftSwapRequest) => {
+    if (r.status === 'approved' || r.status === 'rejected') return false
+    if (r.swapType === 'shift_exchange' && r.status === 'pending' && !r.targetConfirmed) return false
+    return true
   }
 
   return (
@@ -638,6 +682,11 @@ function ApprovalTab() {
           <h3 className="flex items-center gap-2 text-lg font-semibold text-gray-900">
             <ClipboardCheck className="h-5 w-5 text-indigo-600" />
             待审批调班换班申请
+            {requests.length > 0 && (
+              <span className="ml-2 rounded-full bg-indigo-500 px-2 py-0.5 text-xs font-medium text-white">
+                {requests.filter(r => canApprove(r)).length}
+              </span>
+            )}
           </h3>
         </div>
         {loading ? (
@@ -678,16 +727,30 @@ function ApprovalTab() {
                       <span
                         className={cn(
                           'inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium',
-                          getStatusStyle(r.status).className
+                          getStatusInfo(r.status, r.swapType, r.targetConfirmed).className
                         )}
                       >
-                        {getStatusStyle(r.status).label}
+                        {getStatusInfo(r.status, r.swapType, r.targetConfirmed).label}
                       </span>
                     </div>
+                    <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-gray-600">
+                      {r.originalShiftName && (
+                        <span>原班次：{r.originalShiftName}</span>
+                      )}
+                      {r.swapType === 'shift_swap' && r.targetShiftName && (
+                        <span>目标班次：{r.targetShiftName}</span>
+                      )}
+                    </div>
                     <div className="text-sm text-gray-600">原因：{r.reason}</div>
+                    {r.swapType === 'shift_exchange' && (
+                      <div className="flex items-center gap-1 text-xs text-gray-500">
+                        <Clock className="h-3 w-3" />
+                        {r.targetConfirmed ? '对方已确认' : '等待对方确认'}
+                      </div>
+                    )}
                     <div className="text-xs text-gray-400">申请时间：{r.createdAt?.slice(0, 16)}</div>
                   </div>
-                  {(r.status === 'pending' || r.status === 'confirmed') && (
+                  {canApprove(r) ? (
                     <div className="flex gap-2">
                       <button
                         onClick={() => handleApprove(r.id, 'approved')}
@@ -714,6 +777,10 @@ function ApprovalTab() {
                         驳回
                       </button>
                     </div>
+                  ) : (
+                    <span className="text-xs text-gray-400">
+                      {r.status === 'approved' || r.status === 'rejected' ? '已处理' : '待确认'}
+                    </span>
                   )}
                 </div>
               </div>
@@ -774,17 +841,31 @@ function SwapRequestList({
                 <span
                   className={cn(
                     'inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium',
-                    getStatusStyle(r.status).className
+                    getStatusInfo(r.status, r.swapType, r.targetConfirmed).className
                   )}
                 >
-                  {getStatusStyle(r.status).label}
+                  {getStatusInfo(r.status, r.swapType, r.targetConfirmed).label}
                 </span>
+              </div>
+              <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-gray-600">
+                {r.originalShiftName && (
+                  <span>原班次：{r.originalShiftName}</span>
+                )}
+                {r.swapType === 'shift_swap' && r.targetShiftName && (
+                  <span>目标班次：{r.targetShiftName}</span>
+                )}
               </div>
               <div className="text-sm text-gray-600">原因：{r.reason}</div>
               {r.approverName && (
                 <div className="text-xs text-gray-500">
                   审批人：{r.approverName}
                   {r.approvedAt && ` · ${r.approvedAt.slice(0, 16)}`}
+                </div>
+              )}
+              {r.swapType === 'shift_exchange' && r.status !== 'approved' && r.status !== 'rejected' && (
+                <div className="flex items-center gap-1 text-xs text-gray-500">
+                  <Clock className="h-3 w-3" />
+                  {r.targetConfirmed ? '对方已确认，等待审批' : '等待对方确认'}
                 </div>
               )}
               <div className="text-xs text-gray-400">申请时间：{r.createdAt?.slice(0, 16)}</div>
