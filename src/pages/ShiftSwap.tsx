@@ -30,19 +30,30 @@ const IS_MANAGER = true
 type TabType = 'shift_swap' | 'shift_exchange' | 'approval'
 
 const STATUS_MAP: Record<string, { label: string; className: string }> = {
-  pending: { label: '待确认', className: 'bg-gray-100 text-gray-600 border-gray-300' },
+  pending: { label: '待审批', className: 'bg-gray-100 text-gray-600 border-gray-300' },
   confirmed: { label: '已确认待审批', className: 'bg-blue-100 text-blue-700 border-blue-200' },
   approved: { label: '已通过', className: 'bg-green-100 text-green-700 border-green-200' },
   rejected: { label: '已驳回', className: 'bg-red-100 text-red-700 border-red-200' },
 }
 
-function getStatusStyle(status: string) {
-  return (
-    STATUS_MAP[status] || {
-      label: status,
-      className: 'bg-gray-100 text-gray-600 border-gray-200',
+function getStatusInfo(request: ShiftSwapRequest, currentEmployeeId?: number) {
+  const base = STATUS_MAP[request.status] || {
+    label: request.status,
+    className: 'bg-gray-100 text-gray-600 border-gray-200',
+  }
+
+  if (request.swapType === 'shift_exchange' && request.status === 'pending') {
+    if (currentEmployeeId !== undefined && Number(request.targetEmployeeId) === currentEmployeeId) {
+      return { label: '待我确认', className: 'bg-orange-100 text-orange-700 border-orange-200' }
     }
-  )
+    return { label: '待对方确认', className: 'bg-yellow-100 text-yellow-700 border-yellow-200' }
+  }
+
+  if (request.swapType === 'shift_swap' && request.status === 'pending') {
+    return { label: '待审批', className: 'bg-gray-100 text-gray-600 border-gray-300' }
+  }
+
+  return base
 }
 
 function getSwapTypeLabel(type: string) {
@@ -292,6 +303,7 @@ function ShiftSwapTab() {
           requests={myRequests}
           loading={loading}
           emptyText="暂无调班申请记录"
+          currentEmployeeId={CURRENT_EMPLOYEE_ID}
         />
       </div>
     </div>
@@ -354,7 +366,11 @@ function ShiftExchangeTab() {
       if (allRes.success) {
         setIncomingRequests(
           (allRes.data || []).filter(
-            (r: ShiftSwapRequest) => r.swapType === 'shift_exchange' && r.targetEmployeeId === CURRENT_EMPLOYEE_ID && !r.targetConfirmed
+            (r: ShiftSwapRequest) =>
+              r.swapType === 'shift_exchange' &&
+              r.targetEmployeeId === CURRENT_EMPLOYEE_ID &&
+              r.status === 'pending' &&
+              !r.targetConfirmed
           )
         )
       }
@@ -563,6 +579,7 @@ function ShiftExchangeTab() {
           requests={myRequests}
           loading={loading}
           emptyText="暂无换班申请记录"
+          currentEmployeeId={CURRENT_EMPLOYEE_ID}
         />
       </div>
     </div>
@@ -678,21 +695,40 @@ function ApprovalTab() {
                       <span
                         className={cn(
                           'inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium',
-                          getStatusStyle(r.status).className
+                          getStatusInfo(r).className
                         )}
                       >
-                        {getStatusStyle(r.status).label}
+                        {getStatusInfo(r).label}
                       </span>
                     </div>
                     <div className="text-sm text-gray-600">原因：{r.reason}</div>
                     <div className="text-xs text-gray-400">申请时间：{r.createdAt?.slice(0, 16)}</div>
+                    {r.swapType === 'shift_exchange' && (
+                      <div className="text-xs text-gray-400">
+                        {r.targetConfirmed ? '目标员工已确认' : '等待目标员工确认'}
+                      </div>
+                    )}
+                    {(r.originalShiftName || r.targetShiftName) && (
+                      <div className="text-xs text-gray-400">
+                        原班次：{r.originalShiftName || '-'}
+                        {r.targetShiftName && ` → 目标班次：${r.targetShiftName}`}
+                      </div>
+                    )}
                   </div>
                   {(r.status === 'pending' || r.status === 'confirmed') && (
                     <div className="flex gap-2">
                       <button
                         onClick={() => handleApprove(r.id, 'approved')}
-                        disabled={approvingId === r.id}
-                        className="inline-flex items-center gap-1 rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-sm font-medium text-green-700 hover:bg-green-100 disabled:opacity-60"
+                        disabled={
+                          approvingId === r.id ||
+                          (r.swapType === 'shift_exchange' && r.status === 'pending' && !r.targetConfirmed)
+                        }
+                        title={
+                          r.swapType === 'shift_exchange' && r.status === 'pending' && !r.targetConfirmed
+                            ? '需目标员工确认后才可通过'
+                            : ''
+                        }
+                        className="inline-flex items-center gap-1 rounded-lg border border-green-200 bg-green-50 px-3 py-1.5 text-sm font-medium text-green-700 hover:bg-green-100 disabled:opacity-60 disabled:cursor-not-allowed"
                       >
                         {approvingId === r.id ? (
                           <Loader2 className="h-4 w-4 animate-spin" />
@@ -729,10 +765,12 @@ function SwapRequestList({
   requests,
   loading,
   emptyText,
+  currentEmployeeId,
 }: {
   requests: ShiftSwapRequest[]
   loading: boolean
   emptyText: string
+  currentEmployeeId?: number
 }) {
   if (loading) {
     return (
@@ -751,47 +789,59 @@ function SwapRequestList({
   }
   return (
     <div className="divide-y divide-gray-100">
-      {requests.map((r) => (
-        <div key={r.id} className="px-6 py-4">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="flex-1 space-y-2">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className={cn(
-                  'inline-flex items-center rounded-md px-2.5 py-0.5 text-sm font-medium',
-                  r.swapType === 'shift_swap'
-                    ? 'bg-indigo-50 text-indigo-700'
-                    : 'bg-purple-50 text-purple-700'
-                )}>
-                  {getSwapTypeLabel(r.swapType)}
-                </span>
-                <span className="text-sm text-gray-600">原日期：{r.originalDate}</span>
-                {r.swapType === 'shift_swap' && r.targetDate && (
-                  <span className="text-sm text-gray-600">目标日期：{r.targetDate}</span>
-                )}
-                {r.swapType === 'shift_exchange' && r.targetEmployeeName && (
-                  <span className="text-sm text-gray-600">换班对象：{r.targetEmployeeName}</span>
-                )}
-                <span
-                  className={cn(
-                    'inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium',
-                    getStatusStyle(r.status).className
+      {requests.map((r) => {
+        const statusInfo = getStatusInfo(r, currentEmployeeId)
+        return (
+          <div key={r.id} className="px-6 py-4">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="flex-1 space-y-2">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className={cn(
+                    'inline-flex items-center rounded-md px-2.5 py-0.5 text-sm font-medium',
+                    r.swapType === 'shift_swap'
+                      ? 'bg-indigo-50 text-indigo-700'
+                      : 'bg-purple-50 text-purple-700'
+                  )}>
+                    {getSwapTypeLabel(r.swapType)}
+                  </span>
+                  <span className="text-sm text-gray-600">原日期：{r.originalDate}</span>
+                  {r.swapType === 'shift_swap' && r.targetDate && (
+                    <span className="text-sm text-gray-600">目标日期：{r.targetDate}</span>
                   )}
-                >
-                  {getStatusStyle(r.status).label}
-                </span>
-              </div>
-              <div className="text-sm text-gray-600">原因：{r.reason}</div>
-              {r.approverName && (
-                <div className="text-xs text-gray-500">
-                  审批人：{r.approverName}
-                  {r.approvedAt && ` · ${r.approvedAt.slice(0, 16)}`}
+                  {r.swapType === 'shift_exchange' && r.targetEmployeeName && (
+                    <span className="text-sm text-gray-600">换班对象：{r.targetEmployeeName}</span>
+                  )}
+                  <span
+                    className={cn(
+                      'inline-flex rounded-full border px-2.5 py-0.5 text-xs font-medium',
+                      statusInfo.className
+                    )}
+                  >
+                    {statusInfo.label}
+                  </span>
                 </div>
-              )}
-              <div className="text-xs text-gray-400">申请时间：{r.createdAt?.slice(0, 16)}</div>
+                <div className="text-sm text-gray-600">原因：{r.reason}</div>
+                <div className="text-xs text-gray-400">
+                  原班次：{r.originalShiftName || '-'}
+                  {r.targetShiftName && ` → 目标班次：${r.targetShiftName}`}
+                </div>
+                {r.swapType === 'shift_exchange' && (
+                  <div className="text-xs text-gray-400">
+                    {r.targetConfirmed ? '对方已确认' : '等待对方确认'}
+                  </div>
+                )}
+                {r.approverName && (
+                  <div className="text-xs text-gray-500">
+                    审批人：{r.approverName}
+                    {r.approvedAt && ` · ${r.approvedAt.slice(0, 16)}`}
+                  </div>
+                )}
+                <div className="text-xs text-gray-400">申请时间：{r.createdAt?.slice(0, 16)}</div>
+              </div>
             </div>
           </div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }
