@@ -17,6 +17,28 @@ router.post('/apply', (req: Request, res: Response): void => {
       return
     }
 
+    if (swapType === 'shift_swap') {
+      if (!targetDate) {
+        res.json({ success: false, error: '调班需要指定目标日期' })
+        return
+      }
+      if (!targetShiftId) {
+        res.json({ success: false, error: '调班需要指定目标班次' })
+        return
+      }
+    }
+
+    if (swapType === 'shift_exchange') {
+      if (!targetEmployeeId) {
+        res.json({ success: false, error: '换班需要指定目标员工' })
+        return
+      }
+      if (Number(requesterId) === Number(targetEmployeeId)) {
+        res.json({ success: false, error: '不能与自己换班' })
+        return
+      }
+    }
+
     const requesterSchedule = db.prepare(
       'SELECT id, shift_id FROM schedules WHERE employee_id = ? AND schedule_date = ?'
     ).get(requesterId, originalDate) as any
@@ -26,12 +48,18 @@ router.post('/apply', (req: Request, res: Response): void => {
       return
     }
 
-    if (swapType === 'shift_exchange') {
-      if (!targetEmployeeId) {
-        res.json({ success: false, error: '换班需要指定目标员工' })
+    if (swapType === 'shift_swap') {
+      const targetSchedule = db.prepare(
+        'SELECT id, shift_id FROM schedules WHERE employee_id = ? AND schedule_date = ?'
+      ).get(requesterId, targetDate) as any
+
+      if (!targetSchedule) {
+        res.json({ success: false, error: '申请人在目标日期没有排班，无法调班' })
         return
       }
+    }
 
+    if (swapType === 'shift_exchange') {
       const targetSchedule = db.prepare(
         'SELECT id, shift_id FROM schedules WHERE employee_id = ? AND schedule_date = ?'
       ).get(targetEmployeeId, originalDate) as any
@@ -42,33 +70,47 @@ router.post('/apply', (req: Request, res: Response): void => {
       }
     }
 
-    const info = db.prepare(
-      `INSERT INTO shift_swap_requests
-        (requester_id, target_employee_id, swap_type, original_date, target_date, original_shift_id, target_shift_id, reason, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
-    ).run(
-      requesterId,
-      targetEmployeeId || null,
-      swapType,
-      originalDate,
-      targetDate || null,
-      originalShiftId,
-      targetShiftId || null,
-      reason
-    ) as any
+    const existingPending = db.prepare(
+      `SELECT id FROM shift_swap_requests
+       WHERE requester_id = ? AND original_date = ? AND status IN ('pending', 'confirmed')`
+    ).get(requesterId, originalDate) as any
 
-    if (swapType === 'shift_exchange' && targetEmployeeId) {
-      const requester = db.prepare('SELECT name FROM employees WHERE id = ?').get(requesterId) as any
-      db.prepare(
-        `INSERT INTO notifications (employee_id, title, content, type) VALUES (?, ?, ?, 'swap')`
-      ).run(
-        targetEmployeeId,
-        '换班申请',
-        `${requester?.name || '有员工'}申请与您在${originalDate}换班，请确认`
-      )
+    if (existingPending) {
+      res.json({ success: false, error: '该日期已有待处理的调班申请' })
+      return
     }
 
-    res.json({ success: true, data: { id: info.lastInsertRowid } })
+    const result = db.transaction(() => {
+      const info = db.prepare(
+        `INSERT INTO shift_swap_requests
+          (requester_id, target_employee_id, swap_type, original_date, target_date, original_shift_id, target_shift_id, reason, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+      ).run(
+        requesterId,
+        targetEmployeeId || null,
+        swapType,
+        originalDate,
+        targetDate || null,
+        originalShiftId,
+        targetShiftId || null,
+        reason
+      )
+
+      if (swapType === 'shift_exchange' && targetEmployeeId) {
+        const requester = db.prepare('SELECT name FROM employees WHERE id = ?').get(requesterId) as any
+        db.prepare(
+          `INSERT INTO notifications (employee_id, title, content, type) VALUES (?, ?, ?, 'swap')`
+        ).run(
+          targetEmployeeId,
+          '换班申请',
+          `${requester?.name || '有员工'}申请与您在${originalDate}换班，请确认`
+        )
+      }
+
+      return info
+    })() as any
+
+    res.json({ success: true, data: { id: result.lastInsertRowid } })
   } catch (err: any) {
     res.json({ success: false, error: err.message || '申请失败' })
   }
@@ -110,18 +152,33 @@ router.post('/confirm/:id', (req: Request, res: Response): void => {
       return
     }
 
-    db.prepare(
-      `UPDATE shift_swap_requests SET target_confirmed = 1, status = 'confirmed' WHERE id = ?`
-    ).run(id)
+    const targetSchedule = db.prepare(
+      'SELECT id FROM schedules WHERE employee_id = ? AND schedule_date = ?'
+    ).get(targetEmployeeId, request.original_date) as any
 
-    const target = db.prepare('SELECT name FROM employees WHERE id = ?').get(targetEmployeeId) as any
-    db.prepare(
-      `INSERT INTO notifications (employee_id, title, content, type) VALUES (?, ?, ?, 'swap')`
-    ).run(
-      request.requester_id,
-      '换班已确认',
-      `${target?.name || '目标员工'}已确认您的换班申请，等待审批`
-    )
+    if (!targetSchedule) {
+      res.json({ success: false, error: '您在原日期已无排班，无法确认换班' })
+      return
+    }
+
+    db.transaction(() => {
+      const updateResult = db.prepare(
+        `UPDATE shift_swap_requests SET target_confirmed = 1, status = 'confirmed' WHERE id = ? AND status = 'pending' AND target_confirmed = 0`
+      ).run(id)
+
+      if (updateResult.changes === 0) {
+        throw new Error('确认失败，申请状态可能已变更')
+      }
+
+      const target = db.prepare('SELECT name FROM employees WHERE id = ?').get(targetEmployeeId) as any
+      db.prepare(
+        `INSERT INTO notifications (employee_id, title, content, type) VALUES (?, ?, ?, 'swap')`
+      ).run(
+        request.requester_id,
+        '换班已确认',
+        `${target?.name || '目标员工'}已确认您的换班申请，等待审批`
+      )
+    })()
 
     res.json({ success: true, data: null })
   } catch (err: any) {
@@ -168,9 +225,13 @@ router.post('/approve/:id', (req: Request, res: Response): void => {
 
     if (status === 'approved') {
       db.transaction(() => {
-        db.prepare(
-          `UPDATE shift_swap_requests SET status = 'approved', approver_id = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ?`
+        const lockResult = db.prepare(
+          `UPDATE shift_swap_requests SET status = 'approved', approver_id = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('pending', 'confirmed')`
         ).run(approverId, id)
+
+        if (lockResult.changes === 0) {
+          throw new Error('审批失败，申请状态可能已变更')
+        }
 
         if (request.swap_type === 'shift_swap') {
           const originalSchedule = db.prepare(
@@ -181,11 +242,50 @@ router.post('/approve/:id', (req: Request, res: Response): void => {
             'SELECT id, shift_id FROM schedules WHERE employee_id = ? AND schedule_date = ?'
           ).get(request.requester_id, request.target_date) as any
 
+          if (!originalSchedule && !targetSchedule) {
+            db.prepare(
+              `UPDATE shift_swap_requests SET status = 'rejected' WHERE id = ?`
+            ).run(id)
+            throw new Error('原日期和目标日期均无排班，无法执行调班，申请已自动驳回')
+          }
+
           if (originalSchedule && targetSchedule) {
+            if (Number(originalSchedule.shift_id) !== Number(request.original_shift_id)) {
+              db.prepare(
+                `UPDATE shift_swap_requests SET status = 'rejected' WHERE id = ?`
+              ).run(id)
+              throw new Error('原日期排班已变更，无法执行调班，申请已自动驳回')
+            }
             db.prepare('UPDATE schedules SET shift_id = ? WHERE id = ?').run(targetSchedule.shift_id, originalSchedule.id)
             db.prepare('UPDATE schedules SET shift_id = ? WHERE id = ?').run(originalSchedule.shift_id, targetSchedule.id)
           } else if (originalSchedule && !targetSchedule) {
-            db.prepare('UPDATE schedules SET shift_id = ?, schedule_date = ? WHERE id = ?').run(request.target_shift_id || originalSchedule.shift_id, request.target_date, originalSchedule.id)
+            if (Number(originalSchedule.shift_id) !== Number(request.original_shift_id)) {
+              db.prepare(
+                `UPDATE shift_swap_requests SET status = 'rejected' WHERE id = ?`
+              ).run(id)
+              throw new Error('原日期排班已变更，无法执行调班，申请已自动驳回')
+            }
+            if (!request.target_shift_id) {
+              db.prepare(
+                `UPDATE shift_swap_requests SET status = 'rejected' WHERE id = ?`
+              ).run(id)
+              throw new Error('目标班次信息缺失，无法执行调班，申请已自动驳回')
+            }
+            db.prepare('UPDATE schedules SET shift_id = ?, schedule_date = ? WHERE id = ?').run(request.target_shift_id, request.target_date, originalSchedule.id)
+          } else {
+            if (Number(targetSchedule.shift_id) !== Number(request.target_shift_id)) {
+              db.prepare(
+                `UPDATE shift_swap_requests SET status = 'rejected' WHERE id = ?`
+              ).run(id)
+              throw new Error('目标日期排班已变更，无法执行调班，申请已自动驳回')
+            }
+            if (!request.original_shift_id) {
+              db.prepare(
+                `UPDATE shift_swap_requests SET status = 'rejected' WHERE id = ?`
+              ).run(id)
+              throw new Error('原班次信息缺失，无法执行调班，申请已自动驳回')
+            }
+            db.prepare('UPDATE schedules SET shift_id = ?, schedule_date = ? WHERE id = ?').run(request.original_shift_id, request.original_date, targetSchedule.id)
           }
         } else if (request.swap_type === 'shift_exchange') {
           const requesterSchedule = db.prepare(
@@ -196,10 +296,22 @@ router.post('/approve/:id', (req: Request, res: Response): void => {
             'SELECT id, shift_id FROM schedules WHERE employee_id = ? AND schedule_date = ?'
           ).get(request.target_employee_id, request.original_date) as any
 
-          if (requesterSchedule && targetSchedule) {
-            db.prepare('UPDATE schedules SET shift_id = ? WHERE id = ?').run(targetSchedule.shift_id, requesterSchedule.id)
-            db.prepare('UPDATE schedules SET shift_id = ? WHERE id = ?').run(requesterSchedule.shift_id, targetSchedule.id)
+          if (!requesterSchedule || !targetSchedule) {
+            db.prepare(
+              `UPDATE shift_swap_requests SET status = 'rejected' WHERE id = ?`
+            ).run(id)
+            throw new Error('相关员工排班已变更或不存在，无法执行换班，申请已自动驳回')
           }
+
+          if (Number(requesterSchedule.shift_id) !== Number(request.original_shift_id)) {
+            db.prepare(
+              `UPDATE shift_swap_requests SET status = 'rejected' WHERE id = ?`
+            ).run(id)
+            throw new Error('申请人排班已变更，无法执行换班，申请已自动驳回')
+          }
+
+          db.prepare('UPDATE schedules SET shift_id = ? WHERE id = ?').run(targetSchedule.shift_id, requesterSchedule.id)
+          db.prepare('UPDATE schedules SET shift_id = ? WHERE id = ?').run(requesterSchedule.shift_id, targetSchedule.id)
         }
 
         db.prepare(
@@ -213,18 +325,36 @@ router.post('/approve/:id', (req: Request, res: Response): void => {
         }
       })()
     } else {
-      db.prepare(
-        `UPDATE shift_swap_requests SET status = 'rejected', approver_id = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ?`
-      ).run(approverId, id)
+      db.transaction(() => {
+        const lockResult = db.prepare(
+          `UPDATE shift_swap_requests SET status = 'rejected', approver_id = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('pending', 'confirmed')`
+        ).run(approverId, id)
 
-      db.prepare(
-        `INSERT INTO notifications (employee_id, title, content, type) VALUES (?, ?, ?, 'swap')`
-      ).run(request.requester_id, '调班申请已拒绝', '您的调班申请未被批准')
+        if (lockResult.changes === 0) {
+          throw new Error('驳回失败，申请状态可能已变更')
+        }
+
+        db.prepare(
+          `INSERT INTO notifications (employee_id, title, content, type) VALUES (?, ?, ?, 'swap')`
+        ).run(request.requester_id, '调班申请已拒绝', '您的调班申请未被批准')
+
+        if (request.swap_type === 'shift_exchange' && request.target_employee_id) {
+          db.prepare(
+            `INSERT INTO notifications (employee_id, title, content, type) VALUES (?, ?, ?, 'swap')`
+          ).run(request.target_employee_id, '换班申请已拒绝', '您参与的换班申请未被批准')
+        }
+      })()
     }
 
     res.json({ success: true, data: null })
   } catch (err: any) {
-    res.json({ success: false, error: err.message || '审批失败' })
+    if (err.message && (err.message.includes('已自动驳回') || err.message.includes('已变更'))) {
+      res.json({ success: false, error: err.message })
+    } else if (err.message && err.message.includes('状态可能已变更')) {
+      res.json({ success: false, error: err.message })
+    } else {
+      res.json({ success: false, error: err.message || '审批失败' })
+    }
   }
 })
 
